@@ -146,8 +146,13 @@ select.form-input { appearance: none; cursor: pointer; }
   border: 2px solid var(--border2); background: transparent; transition: all .15s;
 }
 .pin-dot.filled { background: var(--amber); border-color: var(--amber); }
-.pin-grid { display: grid; grid-template-columns: repeat(3, 72px); gap: 10px; justify-content: center; }
-.pin-key { width: 72px; height: 72px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; font-size: 22px; font-weight: 600; color: var(--text); display: flex; align-items: center; justify-content: center; transition: all .1s; user-select: none; }
+.pin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.pin-key {
+  aspect-ratio: 1; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; font-size: 22px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; justify-content: center;
+  transition: all .1s; user-select: none;
+}
 .pin-key:hover { background: var(--surface3); border-color: var(--border2); }
 .pin-key:active { transform: scale(.94); }
 .pin-key.del { font-size: 18px; color: var(--text-dim); }
@@ -277,4 +282,30 @@ select.form-input { appearance: none; cursor: pointer; }
   .page { padding: 20px 16px; }
   .topbar { padding: 12px 16px; }
   .form-row { grid-template-columns: 1fr; }
+}
+
+/* ── ROLE CHECKBOXES ── */
+.role-check-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.role-check-label {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 13px; cursor: pointer; transition: all .15s;
+}
+.role-check-label:hover { border-color: var(--border2); }
+.role-check-label input[type="checkbox"] { accent-color: var(--amber); width: 14px; height: 14px; cursor: pointer; }
+.role-check-label:has(input:checked) { background: #1a1200; border-color: var(--amber); color: var(--amber); }
+
+/* ── PIN REVEAL BUTTON ── */
+.pin-reveal-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer;
+  font-family: var(--font-mono); margin-left: 6px; transition: all .15s;
+}
+.pin-reveal-btn:hover { color: var(--text); border-color: var(--border2); }
+
+/* ── LIST LABEL ── */
+.list-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--text-dim); font-family: var(--font-mono);
+  margin-bottom: 10px;
 }
