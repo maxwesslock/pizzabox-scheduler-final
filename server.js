@@ -202,7 +202,7 @@ app.get("/api/manager/staff/:id", mgr, (req, res) => {
   const data = db();
   const member = data.staff.find((s) => s.id === req.params.id);
   if (!member) return res.status(404).json({ error: "Not found" });
-  res.json({ ...member, pin: "****" });
+  res.json(member);
 });
 
 // ─── SCHEDULE ─────────────────────────────────────────────

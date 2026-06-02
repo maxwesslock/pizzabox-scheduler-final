@@ -590,7 +590,7 @@ async function loadMgrStaff() {
         <div class="card" style="padding:0;overflow:hidden">
           <table class="staff-tbl">
             <thead><tr>
-              <th>Name</th><th>Role</th><th>Rate</th><th>PIN</th><th>Setup</th><th></th>
+              <th>Name</th><th>Role</th><th>Rate</th><th>PIN <button onclick="togglePins()" id="pin-toggle-btn" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:10px;padding:2px 7px;border-radius:3px;cursor:pointer;font-family:var(--font-mono);margin-left:6px">SHOW</button></th><th>Setup</th><th></th>
             </tr></thead>
             <tbody>
               ${staff.map((s) => `
@@ -598,7 +598,7 @@ async function loadMgrStaff() {
                   <td style="font-weight:600">${s.name}</td>
                   <td>${roleBadge(s.role)}</td>
                   <td style="font-family:var(--font-mono);font-size:13px">${s.rate ? "$" + s.rate.toFixed(2) + "/hr" : "—"}</td>
-                  <td style="font-family:var(--font-mono);font-size:13px;letter-spacing:2px">••••</td>
+                  <td style="font-family:var(--font-mono);font-size:13px" id="pin-cell-${s.id}">••••</td>
                   <td>${s.setupComplete
                     ? `<span style="color:var(--green);font-size:12px;font-family:var(--font-mono)">✓ Done</span>`
                     : `<span style="color:var(--amber);font-size:12px;font-family:var(--font-mono)">Pending</span>`
@@ -1052,6 +1052,25 @@ async function resolveSwap(id, action) {
     loadMgrSwaps();
     if ($("m-sched-content")) renderManagerSchedule();
   } catch (e) { toast(e.message, "error"); }
+}
+
+// ── PIN reveal toggle ──
+let _pinsVisible = false;
+async function togglePins() {
+  _pinsVisible = !_pinsVisible;
+  const btn = document.getElementById('pin-toggle-btn');
+  if (btn) btn.textContent = _pinsVisible ? 'HIDE' : 'SHOW';
+  const staff = await api('GET', '/api/manager/staff', null, mgrH());
+  for (const s of staff) {
+    const cell = document.getElementById('pin-cell-' + s.id);
+    if (!cell) continue;
+    if (_pinsVisible) {
+      const full = await api('GET', '/api/manager/staff/' + s.id, null, mgrH());
+      cell.textContent = full.pin !== '****' ? full.pin : '••••';
+    } else {
+      cell.textContent = '••••';
+    }
+  }
 }
 
 // ── Logout ──
