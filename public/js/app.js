@@ -1,722 +1,785 @@
 "use strict";
 
 // ─── STATE ────────────────────────────────────────────────
-const STATE = {
-  mode: null, // "manager" | "staff"
-  staffId: null,
-  staffPin: null,
-  staffName: null,
-  staffStatus: null,
+const S = {
+  mode: null,           // "staff" | "manager"
+  pin: null,
+  memberId: null,
+  memberName: null,
+  memberRole: null,
+  setupComplete: false,
   managerPin: null,
-  currentWeekStart: null,
-  config: { hours: {}, dayNames: [], roles: [] },
+  weekStart: null,
+  config: { dayNames: [], roles: [], dayHours: {} },
+  // availability editing state
+  availData: {},        // { dayIndex: [hour, hour, ...] }
+  availActiveDay: null,
 };
 
 // ─── UTILS ────────────────────────────────────────────────
+function $(id) { return document.getElementById(id); }
+
 function toast(msg, type = "") {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.className = "toast show " + type;
-  setTimeout(() => { el.className = "toast"; }, 3000);
+  const c = $("toast-container");
+  const t = document.createElement("div");
+  t.className = "toast " + type;
+  t.textContent = msg;
+  c.appendChild(t);
+  requestAnimationFrame(() => { requestAnimationFrame(() => t.classList.add("show")); });
+  setTimeout(() => {
+    t.classList.remove("show");
+    setTimeout(() => t.remove(), 300);
+  }, 3000);
 }
 
 function showModal(html) {
-  document.getElementById("modal-box").innerHTML = html;
-  document.getElementById("modal-overlay").classList.remove("hidden");
+  $("modal-box").innerHTML = html;
+  $("modal-overlay").classList.remove("hidden");
 }
+function closeModal() { $("modal-overlay").classList.add("hidden"); }
+$("modal-overlay").addEventListener("click", (e) => { if (e.target === $("modal-overlay")) closeModal(); });
 
-function closeModal() {
-  document.getElementById("modal-overlay").classList.add("hidden");
-}
-
-document.getElementById("modal-overlay").addEventListener("click", (e) => {
-  if (e.target === document.getElementById("modal-overlay")) closeModal();
-});
-
-function getWeekStart(date) {
-  const d = new Date(date);
-  const day = d.getDay(); // 0=Sun
-  const diff = (day === 0 ? -6 : 1 - day);
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
-
-function weekStartToDate(ws) {
-  return new Date(ws + "T00:00:00");
-}
-
-function addWeeks(ws, n) {
-  const d = weekStartToDate(ws);
-  d.setDate(d.getDate() + 7 * n);
-  return d.toISOString().slice(0, 10);
-}
-
-function formatWeekLabel(ws) {
-  const start = weekStartToDate(ws);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
-  const opts = { month: "short", day: "numeric" };
-  return start.toLocaleDateString("en-US", opts) + " – " + end.toLocaleDateString("en-US", opts);
-}
-
-function formatCurrency(n) {
-  return "$" + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-function roleBadge(role) {
-  if (!role) return "";
-  const key = role.toLowerCase().replace(/\s+/g, "-");
-  return `<span class="badge badge-${key}">${role}</span>`;
-}
-
-function statusBadge(s) {
-  return `<span class="badge badge-${s}">${s.charAt(0).toUpperCase() + s.slice(1)}</span>`;
-}
-
-function dayShort(dayIdx) {
-  return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][dayIdx] || "";
-}
-
-function managerHeaders() {
-  return { "Content-Type": "application/json", managerpin: STATE.managerPin };
-}
-
-function staffHeaders() {
-  return { "Content-Type": "application/json", staffid: STATE.staffId, staffpin: STATE.staffPin };
-}
-
-async function api(method, url, body, headers) {
-  const opts = {
-    method,
-    headers: { "Content-Type": "application/json", ...(headers || {}) },
-  };
+async function api(method, url, body, headers = {}) {
+  const opts = { method, headers: { "Content-Type": "application/json", ...headers } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }
 
-// ─── SCREENS ─────────────────────────────────────────────
-function showScreen(id) {
-  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
-  document.getElementById(id).classList.add("active");
+function mgrH() { return { managerpin: S.managerPin }; }
+function staffH() { return { staffpin: S.pin }; }
+
+function getWeekStart(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().slice(0, 10);
 }
+function addWeeks(ws, n) {
+  const d = new Date(ws + "T00:00:00");
+  d.setDate(d.getDate() + n * 7);
+  return d.toISOString().slice(0, 10);
+}
+function fmtWeek(ws) {
+  const s = new Date(ws + "T00:00:00");
+  const e = new Date(s); e.setDate(e.getDate() + 6);
+  const o = { month: "short", day: "numeric" };
+  return s.toLocaleDateString("en-US", o) + " – " + e.toLocaleDateString("en-US", o);
+}
+function fmtMoney(n) { return "$" + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+function roleBadge(role) {
+  if (!role) return "";
+  const k = role.toLowerCase().replace(/\s+/g, "-");
+  return `<span class="badge badge-${k}">${role}</span>`;
+}
+
+function dayLabel(i) { return (S.config.dayNames[i] || "").slice(0, 3).toUpperCase(); }
 
 // ─── INIT ─────────────────────────────────────────────────
 async function init() {
-  const cfg = await api("GET", "/api/config");
-  STATE.config = cfg;
-  STATE.currentWeekStart = getWeekStart(new Date());
-  renderLoginScreen();
-  showScreen("screen-login");
+  S.config = await api("GET", "/api/config");
+  S.weekStart = getWeekStart(new Date());
+  renderPinScreen();
 }
 
-// ─── LOGIN SCREEN ──────────────────────────────────────────
-function renderLoginScreen() {
-  const el = document.getElementById("screen-login");
-  el.innerHTML = `
-    <div class="login-card">
-      <div class="login-header">
-        <h1>THE PIZZA<span>BOX</span> NY</h1>
-        <p>Bleecker Street · Greenwich Village</p>
-      </div>
-      <div class="tab-row">
-        <button class="tab-btn active" id="tab-staff-btn" onclick="switchLoginTab('staff')">Staff</button>
-        <button class="tab-btn" id="tab-manager-btn" onclick="switchLoginTab('manager')">Manager</button>
-      </div>
-
-      <!-- STAFF FORM -->
-      <div id="staff-login-section">
-        <div id="form-staff-login" class="login-form">
-          <div class="form-group">
-            <label class="form-label">Your Name</label>
-            <input class="form-input" id="sl-name" placeholder="First Last" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">4-Digit PIN</label>
-            <input class="form-input" id="sl-pin" type="password" maxlength="4" inputmode="numeric" placeholder="••••" />
-          </div>
-          <button class="btn btn-primary" onclick="staffLogin()">Sign In</button>
-          <div class="login-footer">
-            No account? <button class="link-btn" onclick="switchToSignup()">Create one</button>
-          </div>
+// ══════════════════════════════════════════════════════════
+// PIN SCREEN
+// ══════════════════════════════════════════════════════════
+function renderPinScreen() {
+  $("app").innerHTML = `
+    <div class="pin-screen">
+      <div class="pin-logo">THE PIZZA<em>BOX</em> NY</div>
+      <div class="pin-subtitle">BLEECKER STREET · GREENWICH VILLAGE</div>
+      <div class="pin-card">
+        <div class="pin-dots">
+          <div class="pin-dot" id="pd0"></div>
+          <div class="pin-dot" id="pd1"></div>
+          <div class="pin-dot" id="pd2"></div>
+          <div class="pin-dot" id="pd3"></div>
         </div>
-
-        <div id="form-staff-signup" class="login-form hidden">
-          <div class="form-group">
-            <label class="form-label">Full Name</label>
-            <input class="form-input" id="su-name" placeholder="First Last" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Choose a 4-Digit PIN</label>
-            <input class="form-input" id="su-pin" type="password" maxlength="4" inputmode="numeric" placeholder="••••" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Availability (select days you can work)</label>
-            <div class="avail-grid" id="avail-grid"></div>
-          </div>
-          <button class="btn btn-primary" onclick="staffSignup()">Create Account</button>
-          <div class="login-footer">
-            Have an account? <button class="link-btn" onclick="switchToLogin()">Sign in</button>
-          </div>
-        </div>
+        <div class="pin-grid" id="pin-grid"></div>
+        <div class="pin-error" id="pin-error"></div>
       </div>
-
-      <!-- MANAGER FORM -->
-      <div id="manager-login-section" class="hidden">
-        <div class="login-form">
-          <div class="form-group">
-            <label class="form-label">Manager PIN</label>
-            <input class="form-input" id="ml-pin" type="password" maxlength="6" inputmode="numeric" placeholder="••••" />
-          </div>
-          <button class="btn btn-primary" onclick="managerLogin()">Sign In as Manager</button>
-        </div>
+      <div class="pin-manager-btn">
+        <button class="pin-manager-link" onclick="showManagerPinEntry()">Manager Login</button>
       </div>
     </div>
   `;
-  renderAvailGrid();
-  document.getElementById("sl-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") staffLogin(); });
-  document.getElementById("ml-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") managerLogin(); });
+  buildPinGrid("pin-grid", onStaffPinDigit, onStaffPinDel);
+  window._pinBuffer = "";
 }
 
-function renderAvailGrid() {
-  const grid = document.getElementById("avail-grid");
-  if (!grid) return;
-  const dayNames = STATE.config.dayNames;
-  const hours = STATE.config.hours;
-  grid.innerHTML = "";
-  for (let i = 0; i < 7; i++) {
-    const closed = !hours[i === 0 ? 0 : i]; // hours key 0=Mon
-    const idx = i; // 0=Mon
+function buildPinGrid(gridId, onDigit, onDel) {
+  const grid = $(gridId);
+  const keys = ["1","2","3","4","5","6","7","8","9","","0","⌫"];
+  keys.forEach((k) => {
     const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "avail-btn" + (closed ? " closed" : "");
-    btn.textContent = (dayNames[i] || "").slice(0, 3).toUpperCase();
-    btn.dataset.day = i;
-    if (!closed) {
-      btn.addEventListener("click", () => {
-        btn.classList.toggle("selected");
-      });
-    }
+    btn.className = "pin-key" + (k === "" ? " empty" : k === "⌫" ? " del" : "");
+    btn.textContent = k;
+    if (k !== "") btn.addEventListener("click", () => k === "⌫" ? onDel() : onDigit(k));
     grid.appendChild(btn);
-  }
-}
-
-window._loginTab = "staff";
-function switchLoginTab(tab) {
-  window._loginTab = tab;
-  document.getElementById("tab-staff-btn").classList.toggle("active", tab === "staff");
-  document.getElementById("tab-manager-btn").classList.toggle("active", tab === "manager");
-  document.getElementById("staff-login-section").classList.toggle("hidden", tab !== "staff");
-  document.getElementById("manager-login-section").classList.toggle("hidden", tab !== "manager");
-}
-
-function switchToSignup() {
-  document.getElementById("form-staff-login").classList.add("hidden");
-  document.getElementById("form-staff-signup").classList.remove("hidden");
-}
-function switchToLogin() {
-  document.getElementById("form-staff-signup").classList.add("hidden");
-  document.getElementById("form-staff-login").classList.remove("hidden");
-}
-
-async function staffLogin() {
-  const name = document.getElementById("sl-name").value.trim();
-  const pin = document.getElementById("sl-pin").value.trim();
-  if (!name || !pin) return toast("Name and PIN required", "error");
-  try {
-    const data = await api("POST", "/api/staff/login", { name, pin });
-    STATE.staffId = data.id;
-    STATE.staffPin = pin;
-    STATE.staffName = data.name;
-    STATE.staffStatus = data.status;
-    if (data.status === "pending") {
-      renderPendingScreen();
-      showScreen("screen-pending");
-    } else {
-      renderStaffScreen();
-      showScreen("screen-staff");
-    }
-  } catch (e) {
-    toast(e.message, "error");
-  }
-}
-
-async function staffSignup() {
-  const name = document.getElementById("su-name").value.trim();
-  const pin = document.getElementById("su-pin").value.trim();
-  if (!name || !pin || !/^\d{4}$/.test(pin)) {
-    return toast("Name and 4-digit numeric PIN required", "error");
-  }
-  const selected = [];
-  document.querySelectorAll(".avail-btn.selected").forEach((b) => {
-    selected.push(parseInt(b.dataset.day, 10));
   });
-  try {
-    await api("POST", "/api/staff/signup", { name, pin, availability: selected });
-    toast("Account created! Awaiting manager approval.", "success");
-    STATE.staffId = null; // will be set on login
-    // Log them in right away
-    const data = await api("POST", "/api/staff/login", { name, pin });
-    STATE.staffId = data.id;
-    STATE.staffPin = pin;
-    STATE.staffName = data.name;
-    STATE.staffStatus = data.status;
-    renderPendingScreen();
-    showScreen("screen-pending");
-  } catch (e) {
-    toast(e.message, "error");
+}
+
+function onStaffPinDigit(d) {
+  if (window._pinBuffer.length >= 4) return;
+  window._pinBuffer += d;
+  updatePinDots(window._pinBuffer.length);
+  if (window._pinBuffer.length === 4) setTimeout(() => submitStaffPin(), 120);
+}
+function onStaffPinDel() {
+  window._pinBuffer = window._pinBuffer.slice(0, -1);
+  updatePinDots(window._pinBuffer.length);
+  $("pin-error").textContent = "";
+}
+function updatePinDots(n) {
+  for (let i = 0; i < 4; i++) {
+    const dot = $("pd" + i);
+    if (dot) dot.classList.toggle("filled", i < n);
   }
 }
 
-async function managerLogin() {
-  const pin = document.getElementById("ml-pin").value.trim();
-  if (!pin) return toast("PIN required", "error");
+async function submitStaffPin() {
   try {
-    const data = await api("POST", "/api/manager/login", { pin });
-    STATE.managerPin = pin;
-    STATE.mode = "manager";
-    renderManagerScreen();
-    showScreen("screen-manager");
-  } catch (e) {
-    toast(e.message, "error");
-  }
-}
-
-// ─── PENDING SCREEN ────────────────────────────────────────
-function renderPendingScreen() {
-  document.getElementById("screen-pending").innerHTML = `
-    <div class="pending-card">
-      <div class="pending-icon">⏳</div>
-      <h2>Hang tight, ${STATE.staffName || ""}!</h2>
-      <p>Your account is pending manager approval. You'll be able to log in once Max reviews your request.</p>
-      <button class="btn btn-secondary btn-sm" onclick="checkPendingStatus()">Check Status</button>
-      <button class="btn btn-ghost btn-sm" onclick="logout()">Back to Login</button>
-    </div>
-  `;
-}
-
-async function checkPendingStatus() {
-  try {
-    const data = await api("GET", "/api/staff/status", null, staffHeaders());
-    if (data.status === "approved") {
-      STATE.staffStatus = "approved";
-      renderStaffScreen();
-      showScreen("screen-staff");
-      toast("You're approved! Welcome aboard.", "success");
+    const data = await api("POST", "/api/staff/login", { pin: window._pinBuffer });
+    S.pin = window._pinBuffer;
+    S.memberId = data.id;
+    S.memberName = data.name;
+    S.memberRole = data.role;
+    S.setupComplete = data.setupComplete;
+    S.mode = "staff";
+    if (!S.setupComplete) {
+      renderAvailScreen(true);
     } else {
-      toast("Still pending — check back soon.", "");
+      renderStaffScreen();
     }
   } catch (e) {
-    toast(e.message, "error");
+    $("pin-error").textContent = "Invalid PIN. Try again.";
+    window._pinBuffer = "";
+    updatePinDots(0);
   }
 }
 
-// ─── LOGOUT ───────────────────────────────────────────────
-function logout() {
-  STATE.mode = null;
-  STATE.staffId = null;
-  STATE.staffPin = null;
-  STATE.staffName = null;
-  STATE.staffStatus = null;
-  STATE.managerPin = null;
-  renderLoginScreen();
-  showScreen("screen-login");
-}
-
-// ─── STAFF SCREEN ──────────────────────────────────────────
-function renderStaffScreen() {
-  const el = document.getElementById("screen-staff");
-  el.innerHTML = `
-    <div class="main-layout">
-      <div class="topbar">
-        <div class="topbar-logo">THE PIZZA<span>BOX</span> NY</div>
-        <div class="topbar-right">
-          <span class="topbar-user">${STATE.staffName || ""}</span>
-          <button class="btn btn-ghost btn-sm" onclick="logout()">Sign Out</button>
-        </div>
-      </div>
-      <div class="main-content">
-        <div class="nav-tabs">
-          <button class="nav-tab active" onclick="staffTab('schedule', this)">My Schedule</button>
-          <button class="nav-tab" onclick="staffTab('swaps', this)">Swap Requests</button>
-        </div>
-        <div id="staff-tab-schedule" class="tab-panel active"></div>
-        <div id="staff-tab-swaps" class="tab-panel"></div>
-      </div>
-    </div>
-  `;
-  loadStaffSchedule();
-  loadStaffSwaps();
-}
-
-function staffTab(name, btn) {
-  document.querySelectorAll("#screen-staff .tab-panel").forEach((p) => p.classList.remove("active"));
-  document.querySelectorAll("#screen-staff .nav-tab").forEach((b) => b.classList.remove("active"));
-  document.getElementById("staff-tab-" + name).classList.add("active");
-  btn.classList.add("active");
-}
-
-async function loadStaffSchedule() {
-  const panel = document.getElementById("staff-tab-schedule");
-  if (!panel) return;
-  panel.innerHTML = weekNavHTML("staff") + `<div id="staff-shifts-content"></div>`;
-  await renderStaffShifts();
-}
-
-function weekNavHTML(mode) {
-  return `
-    <div class="week-nav">
-      <button class="week-nav-btn" onclick="changeWeek(-1, '${mode}')">&#8592;</button>
-      <span class="week-nav-label" id="week-label-${mode}">${formatWeekLabel(STATE.currentWeekStart)}</span>
-      <button class="week-nav-btn" onclick="changeWeek(1, '${mode}')">&#8594;</button>
-    </div>
-  `;
-}
-
-function changeWeek(dir, mode) {
-  STATE.currentWeekStart = addWeeks(STATE.currentWeekStart, dir);
-  document.getElementById("week-label-" + mode).textContent = formatWeekLabel(STATE.currentWeekStart);
-  if (mode === "staff") renderStaffShifts();
-  if (mode === "manager-sched") renderManagerSchedule();
-  if (mode === "manager-labor") renderLaborPanel();
-}
-
-async function renderStaffShifts() {
-  const container = document.getElementById("staff-shifts-content");
-  if (!container) return;
-  try {
-    const data = await api("GET", `/api/staff/schedule/${STATE.currentWeekStart}`, null, staffHeaders());
-    if (!data.shifts || data.shifts.length === 0) {
-      container.innerHTML = `<div class="no-shifts">No shifts scheduled this week.</div>`;
-      return;
-    }
-    const sorted = [...data.shifts].sort((a, b) => a.day - b.day);
-    container.innerHTML = `
-      <div class="my-shifts-list">
-        ${sorted.map((s) => `
-          <div class="my-shift-card">
-            <div>
-              <div class="my-shift-day">${STATE.config.dayNames[s.day] || ""}</div>
-              <div class="my-shift-role">${s.role || ""}</div>
-            </div>
-            <div style="text-align:right">
-              <div class="my-shift-time">${s.startTime} – ${s.endTime}</div>
-              <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="requestSwap('${s.id}','${STATE.currentWeekStart}')">Request Swap</button>
-            </div>
-          </div>
-        `).join("")}
-      </div>
-    `;
-  } catch (e) {
-    container.innerHTML = `<div class="no-shifts">Could not load schedule.</div>`;
-  }
-}
-
-async function requestSwap(shiftId, weekStart) {
+function showManagerPinEntry() {
   showModal(`
-    <h3>Request Shift Swap</h3>
-    <div class="modal-form">
+    <h3>Manager Login</h3>
+    <div class="form-stack">
       <div class="form-group">
-        <label class="form-label">Note (optional)</label>
-        <input class="form-input" id="swap-note" placeholder="e.g. Have a family event" />
+        <label class="form-label">Manager PIN</label>
+        <input class="form-input" id="mgr-pin-input" type="password" inputmode="numeric" maxlength="6" placeholder="Enter PIN" autofocus />
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="submitSwap('${shiftId}','${weekStart}')">Submit Request</button>
+        <button class="btn btn-primary" onclick="submitManagerPin()">Sign In</button>
       </div>
     </div>
   `);
+  setTimeout(() => { const el = $("mgr-pin-input"); if (el) el.focus(); }, 50);
+  $("mgr-pin-input") && $("mgr-pin-input").addEventListener("keydown", (e) => { if (e.key === "Enter") submitManagerPin(); });
 }
 
-async function submitSwap(shiftId, weekStart) {
-  const note = document.getElementById("swap-note").value;
+async function submitManagerPin() {
+  const pin = $("mgr-pin-input") ? $("mgr-pin-input").value : "";
   try {
-    await api("POST", "/api/swaps", { shiftId, weekStart, note }, staffHeaders());
-    toast("Swap request submitted!", "success");
+    await api("POST", "/api/manager/login", { pin });
+    S.managerPin = pin;
+    S.mode = "manager";
     closeModal();
-    loadStaffSwaps();
+    renderManagerScreen();
+  } catch (e) {
+    toast("Invalid PIN", "error");
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// AVAILABILITY SCREEN
+// ══════════════════════════════════════════════════════════
+function renderAvailScreen(isFirstTime) {
+  S.availData = {};
+  S.availActiveDay = null;
+  $("app").innerHTML = `
+    <div class="avail-screen">
+      <div class="avail-header">
+        <h1>${isFirstTime ? `WELCOME, ${(S.memberName || "").toUpperCase()}` : "UPDATE AVAILABILITY"}</h1>
+        <p>${isFirstTime ? "Select the hours you're available to work each week." : "Tap a day to update your available hours."}</p>
+      </div>
+      <div class="avail-card">
+        <div class="avail-days-row" id="avail-days-row"></div>
+        <div id="avail-hours-panel"></div>
+        <button class="btn btn-primary btn-full btn-lg" style="margin-top:8px" onclick="saveAvailability(${isFirstTime})">
+          ${isFirstTime ? "Save & Continue →" : "Save Availability"}
+        </button>
+        ${!isFirstTime ? `<button class="btn btn-ghost btn-full" style="margin-top:8px" onclick="renderStaffScreen()">Cancel</button>` : ""}
+      </div>
+    </div>
+  `;
+  buildAvailDays();
+}
+
+function buildAvailDays() {
+  const row = $("avail-days-row");
+  row.innerHTML = "";
+  S.config.dayNames.forEach((name, i) => {
+    const closed = S.config.dayHours[i] === null || S.config.dayHours[i] === undefined ||
+      (typeof S.config.dayHours[i] === "object" && S.config.dayHours[i] === null);
+    const btn = document.createElement("button");
+    const hasHours = S.availData[i] && S.availData[i].length > 0;
+    btn.className = "avail-day-btn" + (closed ? " closed" : "") + (hasHours ? " has-hours" : "") + (S.availActiveDay === i ? " active" : "");
+    btn.textContent = name.slice(0, 3).toUpperCase();
+    btn.dataset.day = i;
+    if (!closed) {
+      btn.addEventListener("click", () => {
+        S.availActiveDay = S.availActiveDay === i ? null : i;
+        buildAvailDays();
+        renderHoursPanel();
+      });
+    }
+    row.appendChild(btn);
+  });
+  renderHoursPanel();
+}
+
+function renderHoursPanel() {
+  const panel = $("avail-hours-panel");
+  if (!panel) return;
+  const i = S.availActiveDay;
+  if (i === null || i === undefined) {
+    panel.innerHTML = "";
+    return;
+  }
+  const dayHours = S.config.dayHours[i];
+  if (!dayHours) {
+    panel.innerHTML = `<div class="avail-closed-msg">Closed this day — no hours to select.</div>`;
+    return;
+  }
+  const open = dayHours.open;
+  const close = dayHours.close; // may be 24
+  const selected = S.availData[i] || [];
+  let hours = [];
+  for (let h = open; h < close; h++) {
+    hours.push(h);
+  }
+
+  panel.innerHTML = `
+    <div class="avail-hours-panel">
+      <div class="avail-hours-label">${S.config.dayNames[i]} — select available hours</div>
+      <div class="avail-hours-grid">
+        ${hours.map((h) => {
+          const label = fmtHour(h) + " – " + fmtHour(h + 1);
+          const sel = selected.includes(h);
+          return `<button class="avail-hour-btn${sel ? " selected" : ""}" onclick="toggleHour(${i},${h})">${label}</button>`;
+        }).join("")}
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="selectAllHours(${i})">All Day</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearDayHours(${i})">Clear</button>
+      </div>
+    </div>
+  `;
+}
+
+function fmtHour(h) {
+  if (h >= 24) h = h - 24;
+  const ampm = h >= 12 ? "pm" : "am";
+  const display = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+  return display + ampm;
+}
+
+function toggleHour(day, hour) {
+  if (!S.availData[day]) S.availData[day] = [];
+  const idx = S.availData[day].indexOf(hour);
+  if (idx === -1) S.availData[day].push(hour);
+  else S.availData[day].splice(idx, 1);
+  buildAvailDays();
+}
+
+function selectAllHours(day) {
+  const dh = S.config.dayHours[day];
+  if (!dh) return;
+  S.availData[day] = [];
+  for (let h = dh.open; h < dh.close; h++) S.availData[day].push(h);
+  buildAvailDays();
+}
+
+function clearDayHours(day) {
+  S.availData[day] = [];
+  buildAvailDays();
+}
+
+async function saveAvailability(isFirstTime) {
+  try {
+    const endpoint = isFirstTime ? "/api/staff/setup" : "/api/staff/availability";
+    await api("POST", endpoint, { availability: S.availData }, staffH());
+    S.setupComplete = true;
+    toast("Availability saved!", "success");
+    renderStaffScreen();
   } catch (e) {
     toast(e.message, "error");
   }
 }
 
-async function loadStaffSwaps() {
-  const panel = document.getElementById("staff-tab-swaps");
-  if (!panel) return;
-  try {
-    const swaps = await api("GET", "/api/swaps/mine", null, staffHeaders());
-    if (!swaps.length) {
-      panel.innerHTML = `
-        <div class="section-header"><div class="section-title">Swap Requests</div></div>
-        <div class="empty-state"><div class="empty-icon">🔄</div>No swap requests yet.</div>
-      `;
-      return;
-    }
-    panel.innerHTML = `
-      <div class="section-header"><div class="section-title">Swap Requests</div></div>
-      <div class="card">
-        ${swaps.map((sw) => `
-          <div class="swap-row">
-            <div class="swap-info">
-              <h4>Week of ${formatWeekLabel(sw.weekStart)}</h4>
-              <p>${sw.note || "No note"} · ${sw.createdAt ? new Date(sw.createdAt).toLocaleDateString() : ""}</p>
-            </div>
-            ${statusBadge(sw.status)}
-          </div>
-        `).join("")}
-      </div>
-    `;
-  } catch (e) {
-    panel.innerHTML = `<div class="empty-state">Could not load swaps.</div>`;
-  }
-}
-
-// ─── MANAGER SCREEN ────────────────────────────────────────
-function renderManagerScreen() {
-  const el = document.getElementById("screen-manager");
-  el.innerHTML = `
-    <div class="main-layout">
+// ══════════════════════════════════════════════════════════
+// STAFF SCREEN
+// ══════════════════════════════════════════════════════════
+function renderStaffScreen() {
+  $("app").innerHTML = `
+    <div>
       <div class="topbar">
-        <div class="topbar-logo">THE PIZZA<span>BOX</span> NY</div>
+        <div class="topbar-logo">THE PIZZA<em>BOX</em> NY</div>
         <div class="topbar-right">
-          <span class="topbar-user">Max · Manager</span>
+          <span class="topbar-name">${S.memberName || ""}</span>
           <button class="btn btn-ghost btn-sm" onclick="logout()">Sign Out</button>
         </div>
       </div>
-      <div class="main-content">
+      <div class="page">
         <div class="nav-tabs">
-          <button class="nav-tab active" onclick="managerTab('staff', this)">Staff</button>
-          <button class="nav-tab" onclick="managerTab('schedule', this)">Schedule</button>
-          <button class="nav-tab" onclick="managerTab('labor', this)">Labor Cost</button>
-          <button class="nav-tab" onclick="managerTab('swaps', this)">Swap Requests</button>
+          <button class="nav-tab active" onclick="staffSwitchTab('schedule',this)">My Schedule</button>
+          <button class="nav-tab" onclick="staffSwitchTab('swaps',this)">Shift Swaps</button>
+          <button class="nav-tab" onclick="staffSwitchTab('availability',this)">Availability</button>
         </div>
-        <div id="manager-tab-staff" class="tab-panel active"></div>
-        <div id="manager-tab-schedule" class="tab-panel"></div>
-        <div id="manager-tab-labor" class="tab-panel"></div>
-        <div id="manager-tab-swaps" class="tab-panel"></div>
+        <div id="s-tab-schedule" class="tab-panel active"></div>
+        <div id="s-tab-swaps" class="tab-panel"></div>
+        <div id="s-tab-availability" class="tab-panel"></div>
       </div>
     </div>
   `;
-  loadManagerStaff();
-  loadManagerSwaps();
+  loadStaffScheduleTab();
+  loadStaffSwapsTab();
+  loadStaffAvailTab();
 }
 
-function managerTab(name, btn) {
-  document.querySelectorAll("#screen-manager .tab-panel").forEach((p) => p.classList.remove("active"));
-  document.querySelectorAll("#screen-manager .nav-tab").forEach((b) => b.classList.remove("active"));
-  document.getElementById("manager-tab-" + name).classList.add("active");
+function staffSwitchTab(name, btn) {
+  document.querySelectorAll("#app .tab-panel").forEach((p) => p.classList.remove("active"));
+  document.querySelectorAll("#app .nav-tab").forEach((b) => b.classList.remove("active"));
+  $("s-tab-" + name).classList.add("active");
   btn.classList.add("active");
-  if (name === "schedule") loadManagerSchedulePanel();
-  if (name === "labor") loadLaborPanel();
-  if (name === "swaps") loadManagerSwaps();
 }
 
-// ─── MANAGER: STAFF ────────────────────────────────────────
-async function loadManagerStaff() {
-  const panel = document.getElementById("manager-tab-staff");
+// Staff: My Schedule
+function loadStaffScheduleTab() {
+  const panel = $("s-tab-schedule");
+  if (!panel) return;
+  panel.innerHTML = weekNavHTML("s") + `<div id="s-shifts"></div>`;
+  renderStaffShifts();
+}
+
+async function renderStaffShifts() {
+  const el = $("s-shifts");
+  if (!el) return;
+  try {
+    const data = await api("GET", `/api/staff/schedule/${S.weekStart}`, null, staffH());
+    if (!data.shifts || !data.shifts.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">📅</div>No shifts scheduled this week.</div>`;
+      return;
+    }
+    const sorted = [...data.shifts].sort((a, b) => a.day - b.day);
+    el.innerHTML = sorted.map((sh) => `
+      <div class="shift-card">
+        <div>
+          <div class="shift-card-day">${S.config.dayNames[sh.day] || ""}</div>
+          <div class="shift-card-role">${sh.role || ""}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="shift-card-time">${sh.startTime} – ${sh.endTime}</div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="openSwapRequest('${sh.id}','${S.weekStart}')">Put Up for Swap</button>
+        </div>
+      </div>
+    `).join("");
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Could not load schedule.</div>`;
+  }
+}
+
+// Staff: Swaps
+async function loadStaffSwapsTab() {
+  const panel = $("s-tab-swaps");
   if (!panel) return;
   try {
-    const staff = await api("GET", "/api/manager/staff", null, managerHeaders());
-    const pending = staff.filter((s) => s.status === "pending");
-    const approved = staff.filter((s) => s.status === "approved");
+    const [mine, available] = await Promise.all([
+      api("GET", "/api/swaps/mine", null, staffH()),
+      api("GET", "/api/swaps/available", null, staffH()),
+    ]);
 
-    let html = `<div class="section-header"><div class="section-title">Staff Management</div></div>`;
+    let html = `<div class="section-header"><div class="section-title">Shift Swaps</div></div>`;
 
-    if (pending.length) {
-      html += `
-        <div class="section-sub" style="margin-bottom:12px;font-size:13px;color:var(--amber);font-family:var(--mono)">
-          ${pending.length} pending approval
+    if (available.length) {
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);font-family:var(--font-mono);margin-bottom:10px">Available to Claim</div>`;
+      html += available.map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${sw.requesterName}'s ${S.config.dayNames[sw.shiftDay] || ""} shift</h4>
+            <p>${sw.shiftStart} – ${sw.shiftEnd} · ${sw.shiftRole}${sw.note ? " · " + sw.note : ""}</p>
+          </div>
+          <div class="swap-card-actions">
+            ${roleBadge(sw.shiftRole)}
+            <button class="btn btn-green btn-sm" onclick="claimSwap('${sw.id}')">I'll Take It</button>
+          </div>
         </div>
-        <div class="card" style="margin-bottom:20px">
-          <table class="staff-table">
-            <thead><tr>
-              <th>Name</th><th>Availability</th><th>Actions</th>
-            </tr></thead>
-            <tbody>
-              ${pending.map((s) => `
-                <tr>
-                  <td>${s.name}</td>
-                  <td><div class="avail-dots">${renderAvailDots(s.availability)}</div></td>
-                  <td>
-                    <button class="btn btn-green btn-sm" onclick="openApproveModal('${s.id}','${s.name}')">Approve</button>
-                    <button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="rejectStaff('${s.id}')">Reject</button>
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </div>
-      `;
+      `).join("");
     }
 
-    if (approved.length) {
-      html += `
-        <div class="card">
-          <table class="staff-table">
-            <thead><tr>
-              <th>Name</th><th>Role</th><th>Rate</th><th>Availability</th><th>Actions</th>
-            </tr></thead>
-            <tbody>
-              ${approved.map((s) => `
-                <tr>
-                  <td style="font-weight:600">${s.name}</td>
-                  <td>${roleBadge(s.role)}</td>
-                  <td style="font-family:var(--mono);font-size:13px">${s.rate ? "$" + s.rate.toFixed(2) + "/hr" : "—"}</td>
-                  <td><div class="avail-dots">${renderAvailDots(s.availability)}</div></td>
-                  <td>
-                    <button class="btn btn-secondary btn-sm" onclick="openEditModal('${s.id}','${s.name}','${s.role}',${s.rate})">Edit</button>
-                    <button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="removeStaff('${s.id}')">Remove</button>
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
+    const pendingMine = mine.filter((s) => s.status === "open" || s.status === "claimed");
+    const resolvedMine = mine.filter((s) => s.status === "approved" || s.status === "denied");
+
+    if (pendingMine.length) {
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);font-family:var(--font-mono);margin:20px 0 10px">My Requests</div>`;
+      html += pendingMine.map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${S.config.dayNames[sw.shiftDay] || ""} shift · ${sw.shiftStart} – ${sw.shiftEnd}</h4>
+            <p>${sw.claimedByName ? "Claimed by " + sw.claimedByName + " · Awaiting manager approval" : "Open — waiting for someone to claim it"}</p>
+          </div>
+          <span class="badge badge-${sw.status}">${sw.status === "claimed" ? "Pending Confirmation" : "Open"}</span>
         </div>
-      `;
+      `).join("");
     }
 
-    if (!staff.length) {
-      html += `<div class="empty-state"><div class="empty-icon">👥</div>No staff yet.</div>`;
+    if (resolvedMine.length) {
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);font-family:var(--font-mono);margin:20px 0 10px">Past Requests</div>`;
+      html += resolvedMine.map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${S.config.dayNames[sw.shiftDay] || ""} shift · ${sw.shiftStart} – ${sw.shiftEnd}</h4>
+            <p>${sw.claimedByName ? sw.claimedByName : "Unclaimed"}</p>
+          </div>
+          <span class="badge badge-${sw.status}">${sw.status}</span>
+        </div>
+      `).join("");
+    }
+
+    if (!available.length && !mine.length) {
+      html += `<div class="empty"><div class="empty-icon">🔄</div>No swap activity yet.</div>`;
     }
 
     panel.innerHTML = html;
   } catch (e) {
-    panel.innerHTML = `<div class="empty-state">Could not load staff.</div>`;
+    panel.innerHTML = `<div class="empty">Could not load swaps.</div>`;
   }
 }
 
-function renderAvailDots(avail) {
-  const days = ["M", "T", "W", "T", "F", "S", "S"];
-  const hours = STATE.config.hours;
-  return days.map((d, i) => {
-    const closed = !hours[i === 0 ? 0 : i];
-    const on = Array.isArray(avail) && avail.includes(i);
-    const cls = closed ? "avail-dot closed-day" : (on ? "avail-dot on" : "avail-dot off");
-    return `<span class="${cls}" title="${STATE.config.dayNames[i] || ""}">${d}</span>`;
-  }).join("");
-}
-
-function openApproveModal(id, name) {
-  const roles = STATE.config.roles;
+function openSwapRequest(shiftId, weekStart) {
   showModal(`
-    <h3>Approve ${name}</h3>
-    <div class="modal-form">
+    <h3>Put Shift Up for Swap</h3>
+    <div class="form-stack">
       <div class="form-group">
-        <label class="form-label">Role</label>
-        <select class="form-input" id="approve-role">
-          <option value="">Select role…</option>
-          ${roles.map((r) => `<option value="${r}">${r}</option>`).join("")}
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Hourly Rate ($)</label>
-        <input class="form-input" id="approve-rate" type="number" min="0" step="0.25" placeholder="e.g. 18.00" />
+        <label class="form-label">Note for coworkers (optional)</label>
+        <input class="form-input" id="swap-note" placeholder="e.g. Family event, need coverage" />
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-green" onclick="approveStaff('${id}')">Approve</button>
+        <button class="btn btn-primary" onclick="submitSwapRequest('${shiftId}','${weekStart}')">Post Swap</button>
       </div>
     </div>
   `);
 }
 
-async function approveStaff(id) {
-  const role = document.getElementById("approve-role").value;
-  const rate = document.getElementById("approve-rate").value;
+async function submitSwapRequest(shiftId, weekStart) {
+  const note = $("swap-note") ? $("swap-note").value : "";
   try {
-    await api("POST", `/api/manager/staff/${id}/approve`, { role, rate }, managerHeaders());
-    toast("Staff approved!", "success");
+    await api("POST", "/api/swaps", { shiftId, weekStart, note }, staffH());
+    toast("Shift posted for swap!", "success");
     closeModal();
-    loadManagerStaff();
+    loadStaffSwapsTab();
   } catch (e) {
     toast(e.message, "error");
   }
 }
 
-function openEditModal(id, name, role, rate) {
-  const roles = STATE.config.roles;
+async function claimSwap(id) {
+  try {
+    await api("POST", `/api/swaps/${id}/claim`, {}, staffH());
+    toast("Claimed! Waiting for manager approval.", "success");
+    loadStaffSwapsTab();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+// Staff: Availability tab
+function loadStaffAvailTab() {
+  const panel = $("s-tab-availability");
+  if (!panel) return;
+  panel.innerHTML = `
+    <div class="section-header"><div class="section-title">My Availability</div></div>
+    <div class="card">
+      <p style="font-size:14px;color:var(--text-dim);margin-bottom:16px">Update the hours you're available to work each week. Your manager will see this when building the schedule.</p>
+      <button class="btn btn-primary" onclick="renderAvailScreen(false)">Edit Availability</button>
+    </div>
+  `;
+}
+
+// ── Week nav helpers ──
+function weekNavHTML(prefix) {
+  return `
+    <div class="week-nav">
+      <button class="week-nav-btn" onclick="changeWeek(-1,'${prefix}')">&#8592;</button>
+      <span class="week-nav-label" id="wk-label-${prefix}">${fmtWeek(S.weekStart)}</span>
+      <button class="week-nav-btn" onclick="changeWeek(1,'${prefix}')">&#8594;</button>
+    </div>
+  `;
+}
+function changeWeek(dir, prefix) {
+  S.weekStart = addWeeks(S.weekStart, dir);
+  const lbl = $("wk-label-" + prefix);
+  if (lbl) lbl.textContent = fmtWeek(S.weekStart);
+  if (prefix === "s") renderStaffShifts();
+  if (prefix === "m-sched") renderManagerSchedule();
+  if (prefix === "m-labor") renderLaborPanel();
+}
+
+// ══════════════════════════════════════════════════════════
+// MANAGER SCREEN
+// ══════════════════════════════════════════════════════════
+function renderManagerScreen() {
+  $("app").innerHTML = `
+    <div>
+      <div class="topbar">
+        <div class="topbar-logo">THE PIZZA<em>BOX</em> NY</div>
+        <div class="topbar-right">
+          <span class="topbar-name">Max · Manager</span>
+          <button class="btn btn-ghost btn-sm" onclick="logout()">Sign Out</button>
+        </div>
+      </div>
+      <div class="page">
+        <div class="nav-tabs">
+          <button class="nav-tab active" onclick="mgrSwitchTab('staff',this)">Employees</button>
+          <button class="nav-tab" onclick="mgrSwitchTab('schedule',this)">Schedule</button>
+          <button class="nav-tab" onclick="mgrSwitchTab('labor',this)">Labor Cost</button>
+          <button class="nav-tab" onclick="mgrSwitchTab('swaps',this)">Swap Requests</button>
+        </div>
+        <div id="m-tab-staff" class="tab-panel active"></div>
+        <div id="m-tab-schedule" class="tab-panel"></div>
+        <div id="m-tab-labor" class="tab-panel"></div>
+        <div id="m-tab-swaps" class="tab-panel"></div>
+      </div>
+    </div>
+  `;
+  loadMgrStaff();
+}
+
+function mgrSwitchTab(name, btn) {
+  document.querySelectorAll("#app .tab-panel").forEach((p) => p.classList.remove("active"));
+  document.querySelectorAll("#app .nav-tab").forEach((b) => b.classList.remove("active"));
+  $("m-tab-" + name).classList.add("active");
+  btn.classList.add("active");
+  if (name === "schedule") loadMgrSchedule();
+  if (name === "labor") loadMgrLabor();
+  if (name === "swaps") loadMgrSwaps();
+}
+
+// ── Manager: Employees ──
+async function loadMgrStaff() {
+  const panel = $("m-tab-staff");
+  if (!panel) return;
+  try {
+    const staff = await api("GET", "/api/manager/staff", null, mgrH());
+    let html = `
+      <div class="section-header">
+        <div class="section-title">Employees</div>
+        <button class="btn btn-primary" onclick="openAddStaffModal()">+ Add Employee</button>
+      </div>
+    `;
+    if (!staff.length) {
+      html += `<div class="empty"><div class="empty-icon">👥</div>No employees yet. Add one above.</div>`;
+    } else {
+      html += `
+        <div class="card" style="padding:0;overflow:hidden">
+          <table class="staff-tbl">
+            <thead><tr>
+              <th>Name</th><th>Role</th><th>Rate</th><th>PIN</th><th>Setup</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${staff.map((s) => `
+                <tr>
+                  <td style="font-weight:600">${s.name}</td>
+                  <td>${roleBadge(s.role)}</td>
+                  <td style="font-family:var(--font-mono);font-size:13px">${s.rate ? "$" + s.rate.toFixed(2) + "/hr" : "—"}</td>
+                  <td style="font-family:var(--font-mono);font-size:13px;letter-spacing:2px">••••</td>
+                  <td>${s.setupComplete
+                    ? `<span style="color:var(--green);font-size:12px;font-family:var(--font-mono)">✓ Done</span>`
+                    : `<span style="color:var(--amber);font-size:12px;font-family:var(--font-mono)">Pending</span>`
+                  }</td>
+                  <td>
+                    <div style="display:flex;gap:6px">
+                      <button class="btn btn-secondary btn-sm" onclick="openEditStaffModal('${s.id}')">Edit</button>
+                      <button class="btn btn-secondary btn-sm" onclick="viewStaffAvail('${s.id}','${s.name}')">Avail</button>
+                      <button class="btn btn-danger btn-sm" onclick="removeStaff('${s.id}')">✕</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+    panel.innerHTML = html;
+  } catch (e) {
+    panel.innerHTML = `<div class="empty">Could not load staff.</div>`;
+  }
+}
+
+function openAddStaffModal() {
+  const roles = S.config.roles;
   showModal(`
-    <h3>Edit ${name}</h3>
-    <div class="modal-form">
+    <h3>Add Employee</h3>
+    <div class="form-stack">
       <div class="form-group">
-        <label class="form-label">Role</label>
-        <select class="form-input" id="edit-role">
-          ${roles.map((r) => `<option value="${r}" ${r === role ? "selected" : ""}>${r}</option>`).join("")}
-        </select>
+        <label class="form-label">Full Name</label>
+        <input class="form-input" id="ns-name" placeholder="First Last" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select class="form-input" id="ns-role">
+            <option value="">Select…</option>
+            ${roles.map((r) => `<option>${r}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Hourly Rate ($)</label>
+          <input class="form-input" id="ns-rate" type="number" min="0" step="0.25" placeholder="e.g. 18.00" />
+        </div>
       </div>
       <div class="form-group">
-        <label class="form-label">Hourly Rate ($)</label>
-        <input class="form-input" id="edit-rate" type="number" min="0" step="0.25" value="${rate || ""}" />
+        <label class="form-label">4-Digit PIN</label>
+        <input class="form-input" id="ns-pin" type="text" inputmode="numeric" maxlength="4" placeholder="e.g. 1234" />
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveStaffEdit('${id}')">Save</button>
+        <button class="btn btn-primary" onclick="addStaff()">Add Employee</button>
       </div>
     </div>
   `);
 }
 
-async function saveStaffEdit(id) {
-  const role = document.getElementById("edit-role").value;
-  const rate = document.getElementById("edit-rate").value;
+async function addStaff() {
+  const name = $("ns-name").value.trim();
+  const role = $("ns-role").value;
+  const rate = $("ns-rate").value;
+  const pin = $("ns-pin").value.trim();
   try {
-    await api("PATCH", `/api/manager/staff/${id}`, { role, rate }, managerHeaders());
+    await api("POST", "/api/manager/staff", { name, role, rate, pin }, mgrH());
+    toast("Employee added!", "success");
+    closeModal();
+    loadMgrStaff();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function openEditStaffModal(id) {
+  const data = await api("GET", `/api/manager/staff/${id}`, null, mgrH());
+  const roles = S.config.roles;
+  showModal(`
+    <h3>Edit ${data.name}</h3>
+    <div class="form-stack">
+      <div class="form-group">
+        <label class="form-label">Full Name</label>
+        <input class="form-input" id="es-name" value="${data.name}" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select class="form-input" id="es-role">
+            ${roles.map((r) => `<option ${r === data.role ? "selected" : ""}>${r}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Hourly Rate ($)</label>
+          <input class="form-input" id="es-rate" type="number" min="0" step="0.25" value="${data.rate || ""}" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">New PIN (leave blank to keep current)</label>
+        <input class="form-input" id="es-pin" type="text" inputmode="numeric" maxlength="4" placeholder="4 digits" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditStaff('${id}')">Save</button>
+      </div>
+    </div>
+  `);
+}
+
+async function saveEditStaff(id) {
+  const name = $("es-name").value.trim();
+  const role = $("es-role").value;
+  const rate = $("es-rate").value;
+  const pin = $("es-pin").value.trim();
+  const body = { name, role, rate };
+  if (pin) body.pin = pin;
+  try {
+    await api("PATCH", `/api/manager/staff/${id}`, body, mgrH());
     toast("Saved!", "success");
     closeModal();
-    loadManagerStaff();
+    loadMgrStaff();
   } catch (e) {
     toast(e.message, "error");
   }
 }
 
-async function rejectStaff(id) {
-  if (!confirm("Reject this applicant?")) return;
+async function viewStaffAvail(id, name) {
   try {
-    await api("DELETE", `/api/manager/staff/${id}`, null, managerHeaders());
-    toast("Removed.", "");
-    loadManagerStaff();
+    const data = await api("GET", `/api/manager/staff/${id}`, null, mgrH());
+    const avail = data.availability || {};
+    const rows = S.config.dayNames.map((day, i) => {
+      const dh = S.config.dayHours[i];
+      if (!dh) return `<tr><td style="color:var(--text-dim)">${day}</td><td style="color:var(--text-muted);font-family:var(--font-mono);font-size:12px">Closed</td></tr>`;
+      const hours = avail[i] || [];
+      const display = hours.length
+        ? hours.sort((a,b)=>a-b).map(fmtHour).join(", ")
+        : `<span style="color:var(--text-muted)">Not available</span>`;
+      return `<tr><td style="font-weight:600">${day}</td><td style="font-family:var(--font-mono);font-size:12px;color:var(--text-dim)">${display}</td></tr>`;
+    }).join("");
+    showModal(`
+      <h3>${name}'s Availability</h3>
+      <table style="width:100%;border-collapse:collapse">
+        <tbody style="font-size:13px">
+          ${rows}
+        </tbody>
+      </table>
+      <div class="modal-actions" style="margin-top:20px">
+        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+      </div>
+    `);
   } catch (e) {
     toast(e.message, "error");
   }
 }
 
 async function removeStaff(id) {
-  if (!confirm("Remove this staff member?")) return;
+  if (!confirm("Remove this employee?")) return;
   try {
-    await api("DELETE", `/api/manager/staff/${id}`, null, managerHeaders());
+    await api("DELETE", `/api/manager/staff/${id}`, null, mgrH());
     toast("Removed.", "");
-    loadManagerStaff();
+    loadMgrStaff();
   } catch (e) {
     toast(e.message, "error");
   }
 }
 
-// ─── MANAGER: SCHEDULE ─────────────────────────────────────
-function loadManagerSchedulePanel() {
-  const panel = document.getElementById("manager-tab-schedule");
+// ── Manager: Schedule ──
+function loadMgrSchedule() {
+  const panel = $("m-tab-schedule");
   if (!panel) return;
-  panel.innerHTML = weekNavHTML("manager-sched") + `<div id="manager-sched-content"></div>`;
+  panel.innerHTML = weekNavHTML("m-sched") + `<div id="m-sched-content"></div>`;
   renderManagerSchedule();
 }
 
 async function renderManagerSchedule() {
-  const container = document.getElementById("manager-sched-content");
-  if (!container) return;
-
+  const el = $("m-sched-content");
+  if (!el) return;
   try {
     const [staffList, weekData] = await Promise.all([
-      api("GET", "/api/manager/staff", null, managerHeaders()),
-      api("GET", `/api/manager/schedule/${STATE.currentWeekStart}`, null, managerHeaders()),
+      api("GET", "/api/manager/staff", null, mgrH()),
+      api("GET", `/api/manager/schedule/${S.weekStart}`, null, mgrH()),
     ]);
-
-    const approved = staffList.filter((s) => s.status === "approved");
     const shifts = weekData.shifts || [];
-    const hours = STATE.config.hours;
-    const dayNames = STATE.config.dayNames;
-
-    // Build a lookup: staffId -> day -> shifts[]
     const shiftMap = {};
     for (const sh of shifts) {
       if (!shiftMap[sh.staffId]) shiftMap[sh.staffId] = {};
@@ -724,122 +787,119 @@ async function renderManagerSchedule() {
       shiftMap[sh.staffId][sh.day].push(sh);
     }
 
-    let html = `
-      <div class="schedule-grid">
-        <table class="schedule-table">
-          <thead><tr>
-            <th>Staff</th>
-            ${dayNames.map((d, i) => {
-              const closed = i === 0 || !hours[i];
-              return `<th class="${closed ? "closed-col" : "day-header"}">${d.slice(0,3).toUpperCase()}${closed ? "<br><span style='font-size:9px;color:var(--red-dim)'>CLOSED</span>" : ""}</th>`;
-            }).join("")}
-          </tr></thead>
-          <tbody>
-    `;
+    const dayHeaders = S.config.dayNames.map((d, i) => {
+      const closed = !S.config.dayHours[i];
+      return `<th class="${closed ? "closed-th" : ""}">${d.slice(0,3).toUpperCase()}${closed ? `<br><span style="font-size:9px;color:var(--red-dark)">CLOSED</span>` : ""}</th>`;
+    }).join("");
 
-    if (!approved.length) {
-      html += `<tr><td colspan="8" class="no-shifts">No approved staff yet.</td></tr>`;
+    let rows = "";
+    if (!staffList.length) {
+      rows = `<tr><td colspan="8" class="empty">No employees yet.</td></tr>`;
     } else {
-      for (const member of approved) {
-        html += `<tr><td class="name-cell">${member.name}<br><span style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">${member.role || ""}</span></td>`;
+      for (const m of staffList) {
+        let cells = "";
         for (let d = 0; d < 7; d++) {
-          const closed = d === 0 || !hours[d];
-          if (closed) {
-            html += `<td class="closed-cell"></td>`;
-          } else {
-            const dayShifts = (shiftMap[member.id] || {})[d] || [];
-            html += `<td>`;
-            for (const sh of dayShifts) {
-              html += `<div class="shift-block" onclick="openEditShiftModal('${sh.id}','${member.id}',${d},'${sh.startTime}','${sh.endTime}','${sh.role || ""}')">
-                <div class="shift-time">${sh.startTime}–${sh.endTime}</div>
-                <div class="shift-role">${sh.role || ""}</div>
-              </div>`;
-            }
-            html += `<button class="shift-add-btn" onclick="openAddShiftModal('${member.id}',${d})">+</button>`;
-            html += `</td>`;
+          const closed = !S.config.dayHours[d];
+          if (closed) { cells += `<td class="closed-td"></td>`; continue; }
+          const dayShifts = (shiftMap[m.id] || {})[d] || [];
+          cells += `<td>`;
+          for (const sh of dayShifts) {
+            cells += `<div class="shift-chip" onclick="openEditShift('${sh.id}','${m.id}',${d},'${sh.startTime}','${sh.endTime}','${sh.role || ""}')">
+              <div class="sc-time">${sh.startTime}–${sh.endTime}</div>
+              <div class="sc-role">${sh.role || ""}</div>
+            </div>`;
           }
+          cells += `<button class="shift-add" onclick="openAddShift('${m.id}',${d})">+</button></td>`;
         }
-        html += `</tr>`;
+        rows += `<tr>
+          <td class="name-td">${m.name}<span>${m.role || ""}</span></td>
+          ${cells}
+        </tr>`;
       }
     }
 
-    html += `</tbody></table></div>`;
-    container.innerHTML = html;
+    el.innerHTML = `
+      <div class="schedule-wrap">
+        <table class="sched-table">
+          <thead><tr><th>Staff</th>${dayHeaders}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
   } catch (e) {
-    container.innerHTML = `<div class="empty-state">Could not load schedule.</div>`;
+    el.innerHTML = `<div class="empty">Could not load schedule.</div>`;
   }
 }
 
-function openAddShiftModal(staffId, day) {
-  const dayName = STATE.config.dayNames[day] || "";
-  const hours = STATE.config.hours;
-  const h = hours[day];
-  const roles = STATE.config.roles;
+function openAddShift(staffId, day) {
+  const dh = S.config.dayHours[day];
+  const roles = S.config.roles;
+  const closeVal = dh && dh.close === 24 ? "23:59" : (dh ? String(dh.close).padStart(2,"0") + ":00" : "22:00");
   showModal(`
-    <h3>Add Shift — ${dayName}</h3>
-    <div class="modal-form">
-      <div class="form-group">
-        <label class="form-label">Start Time</label>
-        <input class="form-input" id="shift-start" type="time" value="${h ? h.open : "11:00"}" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">End Time</label>
-        <input class="form-input" id="shift-end" type="time" value="${h ? (h.close === "24:00" ? "23:59" : h.close) : "22:00"}" />
+    <h3>Add Shift — ${S.config.dayNames[day] || ""}</h3>
+    <div class="form-stack">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Start</label>
+          <input class="form-input" id="sh-start" type="time" value="${dh ? String(dh.open).padStart(2,"0") + ":00" : "11:00"}" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">End</label>
+          <input class="form-input" id="sh-end" type="time" value="${closeVal}" />
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Role</label>
-        <select class="form-input" id="shift-role">
+        <select class="form-input" id="sh-role">
           ${roles.map((r) => `<option>${r}</option>`).join("")}
         </select>
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveNewShift('${staffId}',${day})">Add Shift</button>
+        <button class="btn btn-primary" onclick="saveNewShift('${staffId}',${day})">Add</button>
       </div>
     </div>
   `);
 }
 
 async function saveNewShift(staffId, day) {
-  const start = document.getElementById("shift-start").value;
-  const end = document.getElementById("shift-end").value;
-  const role = document.getElementById("shift-role").value;
-  if (!start || !end) return toast("Start and end time required", "error");
+  const start = $("sh-start").value;
+  const end = $("sh-end").value;
+  const role = $("sh-role").value;
   try {
-    const weekData = await api("GET", `/api/manager/schedule/${STATE.currentWeekStart}`, null, managerHeaders());
+    const weekData = await api("GET", `/api/manager/schedule/${S.weekStart}`, null, mgrH());
     const shifts = weekData.shifts || [];
-    shifts.push({ staffId, day: parseInt(day, 10), startTime: start, endTime: end, role });
-    await api("POST", `/api/manager/schedule/${STATE.currentWeekStart}`, { shifts }, managerHeaders());
+    shifts.push({ staffId, day: parseInt(day), startTime: start, endTime: end, role });
+    await api("POST", `/api/manager/schedule/${S.weekStart}`, { shifts }, mgrH());
     toast("Shift added!", "success");
     closeModal();
     renderManagerSchedule();
-  } catch (e) {
-    toast(e.message, "error");
-  }
+  } catch (e) { toast(e.message, "error"); }
 }
 
-function openEditShiftModal(shiftId, staffId, day, start, end, role) {
-  const dayName = STATE.config.dayNames[day] || "";
-  const roles = STATE.config.roles;
+function openEditShift(shiftId, staffId, day, start, end, role) {
+  const roles = S.config.roles;
   showModal(`
-    <h3>Edit Shift — ${dayName}</h3>
-    <div class="modal-form">
-      <div class="form-group">
-        <label class="form-label">Start Time</label>
-        <input class="form-input" id="shift-start" type="time" value="${start}" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">End Time</label>
-        <input class="form-input" id="shift-end" type="time" value="${end}" />
+    <h3>Edit Shift — ${S.config.dayNames[day] || ""}</h3>
+    <div class="form-stack">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Start</label>
+          <input class="form-input" id="sh-start" type="time" value="${start}" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">End</label>
+          <input class="form-input" id="sh-end" type="time" value="${end}" />
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Role</label>
-        <select class="form-input" id="shift-role">
+        <select class="form-input" id="sh-role">
           ${roles.map((r) => `<option ${r === role ? "selected" : ""}>${r}</option>`).join("")}
         </select>
       </div>
       <div class="modal-actions">
-        <button class="btn btn-danger" style="flex:0.6" onclick="deleteShift('${shiftId}')">Delete</button>
+        <button class="btn btn-danger" style="flex:.6" onclick="deleteShift('${shiftId}')">Delete</button>
         <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         <button class="btn btn-primary" onclick="updateShift('${shiftId}')">Save</button>
       </div>
@@ -848,173 +908,157 @@ function openEditShiftModal(shiftId, staffId, day, start, end, role) {
 }
 
 async function updateShift(shiftId) {
-  const start = document.getElementById("shift-start").value;
-  const end = document.getElementById("shift-end").value;
-  const role = document.getElementById("shift-role").value;
+  const start = $("sh-start").value;
+  const end = $("sh-end").value;
+  const role = $("sh-role").value;
   try {
-    const weekData = await api("GET", `/api/manager/schedule/${STATE.currentWeekStart}`, null, managerHeaders());
+    const weekData = await api("GET", `/api/manager/schedule/${S.weekStart}`, null, mgrH());
     const shifts = weekData.shifts || [];
     const idx = shifts.findIndex((s) => s.id === shiftId);
-    if (idx !== -1) {
-      shifts[idx].startTime = start;
-      shifts[idx].endTime = end;
-      shifts[idx].role = role;
-    }
-    await api("POST", `/api/manager/schedule/${STATE.currentWeekStart}`, { shifts }, managerHeaders());
-    toast("Shift updated!", "success");
+    if (idx !== -1) { shifts[idx].startTime = start; shifts[idx].endTime = end; shifts[idx].role = role; }
+    await api("POST", `/api/manager/schedule/${S.weekStart}`, { shifts }, mgrH());
+    toast("Updated!", "success");
     closeModal();
     renderManagerSchedule();
-  } catch (e) {
-    toast(e.message, "error");
-  }
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function deleteShift(shiftId) {
   if (!confirm("Delete this shift?")) return;
   try {
-    const weekData = await api("GET", `/api/manager/schedule/${STATE.currentWeekStart}`, null, managerHeaders());
+    const weekData = await api("GET", `/api/manager/schedule/${S.weekStart}`, null, mgrH());
     const shifts = (weekData.shifts || []).filter((s) => s.id !== shiftId);
-    await api("POST", `/api/manager/schedule/${STATE.currentWeekStart}`, { shifts }, managerHeaders());
-    toast("Shift removed.", "");
+    await api("POST", `/api/manager/schedule/${S.weekStart}`, { shifts }, mgrH());
+    toast("Deleted.", "");
     closeModal();
     renderManagerSchedule();
-  } catch (e) {
-    toast(e.message, "error");
-  }
+  } catch (e) { toast(e.message, "error"); }
 }
 
-// ─── MANAGER: LABOR COST ────────────────────────────────────
-function loadLaborPanel() {
-  const panel = document.getElementById("manager-tab-labor");
+// ── Manager: Labor ──
+function loadMgrLabor() {
+  const panel = $("m-tab-labor");
   if (!panel) return;
-  panel.innerHTML = weekNavHTML("manager-labor") + `<div id="labor-content"></div>`;
+  panel.innerHTML = weekNavHTML("m-labor") + `<div id="m-labor-content"></div>`;
   renderLaborPanel();
 }
 
 async function renderLaborPanel() {
-  const container = document.getElementById("labor-content");
-  if (!container) return;
+  const el = $("m-labor-content");
+  if (!el) return;
   try {
-    const data = await api("GET", `/api/manager/labor/${STATE.currentWeekStart}`, null, managerHeaders());
-    const laborPctClass = data.laborPct !== null ? (data.laborPct > 35 ? "warn" : "ok") : "";
-    container.innerHTML = `
-      <div class="labor-stats">
-        <div class="labor-stat">
-          <div class="labor-stat-label">Total Labor Cost</div>
-          <div class="labor-stat-value">${formatCurrency(data.totalLaborCost)}</div>
-        </div>
-        <div class="labor-stat">
-          <div class="labor-stat-label">Total Hours</div>
-          <div class="labor-stat-value">${data.totalHours}h</div>
-        </div>
-        <div class="labor-stat">
-          <div class="labor-stat-label">Projected Sales</div>
-          <div class="labor-stat-value">${data.sales ? formatCurrency(data.sales) : "—"}</div>
-        </div>
-        <div class="labor-stat">
-          <div class="labor-stat-label">Labor %</div>
-          <div class="labor-stat-value ${laborPctClass}">${data.laborPct !== null ? data.laborPct + "%" : "—"}</div>
-        </div>
+    const d = await api("GET", `/api/manager/labor/${S.weekStart}`, null, mgrH());
+    const pctClass = d.laborPct !== null ? (d.laborPct > 35 ? "warn" : "ok") : "";
+    el.innerHTML = `
+      <div class="labor-grid">
+        <div class="labor-stat"><div class="labor-stat-label">Labor Cost</div><div class="labor-stat-val">${fmtMoney(d.totalLaborCost)}</div></div>
+        <div class="labor-stat"><div class="labor-stat-label">Total Hours</div><div class="labor-stat-val">${d.totalHours}h</div></div>
+        <div class="labor-stat"><div class="labor-stat-label">Projected Sales</div><div class="labor-stat-val">${d.sales ? fmtMoney(d.sales) : "—"}</div></div>
+        <div class="labor-stat"><div class="labor-stat-label">Labor %</div><div class="labor-stat-val ${pctClass}">${d.laborPct !== null ? d.laborPct + "%" : "—"}</div></div>
       </div>
       <div class="card">
-        <div class="section-header" style="margin-bottom:14px">
-          <div>
-            <div style="font-weight:600;font-size:14px">Manual Sales Input</div>
-            <div style="font-size:12px;color:var(--text-dim);margin-top:2px">Enter projected or actual sales for the week</div>
+        <div class="card-title">Weekly Sales</div>
+        <div style="display:flex;gap:10px;align-items:flex-end">
+          <div class="form-group" style="flex:1">
+            <label class="form-label">Sales ($)</label>
+            <input class="form-input" id="sales-val" type="number" min="0" step="100" value="${d.sales || ""}" placeholder="e.g. 18000" />
           </div>
-        </div>
-        <div class="inline-row">
-          <div class="form-group">
-            <label class="form-label">Weekly Sales ($)</label>
-            <input class="form-input" id="sales-input" type="number" min="0" step="100" value="${data.sales || ""}" placeholder="e.g. 18000" />
-          </div>
-          <button class="btn btn-amber" style="margin-bottom:0;align-self:flex-end" onclick="saveSales()">Save</button>
+          <button class="btn btn-amber" onclick="saveSales()">Save</button>
         </div>
       </div>
     `;
   } catch (e) {
-    container.innerHTML = `<div class="empty-state">Could not load labor data.</div>`;
+    el.innerHTML = `<div class="empty">Could not load labor data.</div>`;
   }
 }
 
 async function saveSales() {
-  const val = document.getElementById("sales-input").value;
+  const val = $("sales-val").value;
   try {
-    await api("POST", `/api/manager/sales/${STATE.currentWeekStart}`, { sales: val }, managerHeaders());
-    toast("Sales saved!", "success");
+    await api("POST", `/api/manager/sales/${S.weekStart}`, { sales: val }, mgrH());
+    toast("Saved!", "success");
     renderLaborPanel();
-  } catch (e) {
-    toast(e.message, "error");
-  }
+  } catch (e) { toast(e.message, "error"); }
 }
 
-// ─── MANAGER: SWAPS ────────────────────────────────────────
-async function loadManagerSwaps() {
-  const panel = document.getElementById("manager-tab-swaps");
+// ── Manager: Swaps ──
+async function loadMgrSwaps() {
+  const panel = $("m-tab-swaps");
   if (!panel) return;
   try {
-    const swaps = await api("GET", "/api/manager/swaps", null, managerHeaders());
-    const pending = swaps.filter((s) => s.status === "pending");
-    const resolved = swaps.filter((s) => s.status !== "pending");
+    const swaps = await api("GET", "/api/manager/swaps", null, mgrH());
+    const pending = swaps.filter((s) => s.status === "claimed");
+    const open = swaps.filter((s) => s.status === "open");
+    const resolved = swaps.filter((s) => s.status === "approved" || s.status === "denied");
 
     let html = `<div class="section-header"><div class="section-title">Swap Requests</div></div>`;
 
     if (pending.length) {
-      html += `<div class="section-sub" style="margin-bottom:12px;font-size:13px;color:var(--amber);font-family:var(--mono)">${pending.length} pending</div>
-      <div class="card" style="margin-bottom:20px">
-        ${pending.map((sw) => `
-          <div class="swap-row">
-            <div class="swap-info">
-              <h4>${sw.requesterName}</h4>
-              <p>Week of ${formatWeekLabel(sw.weekStart)}${sw.note ? " · " + sw.note : ""}</p>
-            </div>
-            <div class="swap-actions">
-              <button class="btn btn-green btn-sm" onclick="resolveSwap('${sw.id}','approve')">Approve</button>
-              <button class="btn btn-danger btn-sm" onclick="resolveSwap('${sw.id}','deny')">Deny</button>
-            </div>
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--amber);font-family:var(--font-mono);margin-bottom:10px">${pending.length} need your approval</div>`;
+      html += pending.map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${sw.requesterName} → ${sw.claimedByName}</h4>
+            <p>${S.config.dayNames[sw.shiftDay] || ""} · ${sw.shiftStart}–${sw.shiftEnd} · ${sw.shiftRole}${sw.note ? " · " + sw.note : ""}</p>
           </div>
-        `).join("")}
-      </div>`;
+          <div class="swap-card-actions">
+            <button class="btn btn-green btn-sm" onclick="resolveSwap('${sw.id}','approve')">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="resolveSwap('${sw.id}','deny')">Deny</button>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    if (open.length) {
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);font-family:var(--font-mono);margin:20px 0 10px">Open (unclaimed)</div>`;
+      html += open.map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${sw.requesterName}</h4>
+            <p>${S.config.dayNames[sw.shiftDay] || ""} · ${sw.shiftStart}–${sw.shiftEnd} · ${sw.shiftRole}${sw.note ? " · " + sw.note : ""}</p>
+          </div>
+          <span class="badge badge-open">Open</span>
+        </div>
+      `).join("");
     }
 
     if (resolved.length) {
-      html += `<div class="card">
-        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:12px;font-family:var(--mono)">Resolved</div>
-        ${resolved.slice(0, 20).map((sw) => `
-          <div class="swap-row">
-            <div class="swap-info">
-              <h4>${sw.requesterName}</h4>
-              <p>Week of ${formatWeekLabel(sw.weekStart)}</p>
-            </div>
-            ${statusBadge(sw.status)}
+      html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);font-family:var(--font-mono);margin:20px 0 10px">Resolved</div>`;
+      html += resolved.slice(0, 30).map((sw) => `
+        <div class="swap-card">
+          <div class="swap-card-info">
+            <h4>${sw.requesterName}${sw.claimedByName ? " → " + sw.claimedByName : ""}</h4>
+            <p>${S.config.dayNames[sw.shiftDay] || ""} · ${sw.shiftStart}–${sw.shiftEnd} · ${sw.shiftRole}</p>
           </div>
-        `).join("")}
-      </div>`;
+          <span class="badge badge-${sw.status}">${sw.status}</span>
+        </div>
+      `).join("");
     }
 
     if (!swaps.length) {
-      html += `<div class="empty-state"><div class="empty-icon">🔄</div>No swap requests.</div>`;
+      html += `<div class="empty"><div class="empty-icon">🔄</div>No swap requests yet.</div>`;
     }
 
     panel.innerHTML = html;
   } catch (e) {
-    panel.innerHTML = `<div class="empty-state">Could not load swap requests.</div>`;
+    panel.innerHTML = `<div class="empty">Could not load swaps.</div>`;
   }
 }
 
 async function resolveSwap(id, action) {
   try {
-    await api("POST", `/api/manager/swaps/${id}`, { action }, managerHeaders());
-    toast(action === "approve" ? "Swap approved — shift removed." : "Swap denied.", action === "approve" ? "success" : "");
-    loadManagerSwaps();
-    // Refresh schedule in background
-    if (document.getElementById("manager-tab-schedule").classList.contains("active")) {
-      renderManagerSchedule();
-    }
-  } catch (e) {
-    toast(e.message, "error");
-  }
+    await api("POST", `/api/manager/swaps/${id}`, { action }, mgrH());
+    toast(action === "approve" ? "Swap approved — shift reassigned." : "Swap denied.", action === "approve" ? "success" : "");
+    loadMgrSwaps();
+    if ($("m-sched-content")) renderManagerSchedule();
+  } catch (e) { toast(e.message, "error"); }
 }
 
-// ─── BOOT ─────────────────────────────────────────────────
+// ── Logout ──
+function logout() {
+  Object.assign(S, { mode: null, pin: null, memberId: null, memberName: null, memberRole: null, setupComplete: false, managerPin: null });
+  renderPinScreen();
+}
+
+// ── Boot ──
 init();
