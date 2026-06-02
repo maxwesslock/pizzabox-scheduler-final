@@ -1,0 +1,14 @@
+{
+  "name": "pizza-box-scheduler",
+  "version": "1.0.0",
+  "description": "Staff scheduling app for The Pizza Box NY",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "uuid": "^9.0.0"
+  }
+}
