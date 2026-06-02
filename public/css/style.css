@@ -146,13 +146,8 @@ select.form-input { appearance: none; cursor: pointer; }
   border: 2px solid var(--border2); background: transparent; transition: all .15s;
 }
 .pin-dot.filled { background: var(--amber); border-color: var(--amber); }
-.pin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-.pin-key {
-  aspect-ratio: 1; background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 10px; font-size: 22px; font-weight: 600; color: var(--text);
-  display: flex; align-items: center; justify-content: center;
-  transition: all .1s; user-select: none;
-}
+.pin-grid { display: grid; grid-template-columns: repeat(3, 72px); gap: 10px; justify-content: center; }
+.pin-key { width: 72px; height: 72px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; font-size: 22px; font-weight: 600; color: var(--text); display: flex; align-items: center; justify-content: center; transition: all .1s; user-select: none; }
 .pin-key:hover { background: var(--surface3); border-color: var(--border2); }
 .pin-key:active { transform: scale(.94); }
 .pin-key.del { font-size: 18px; color: var(--text-dim); }
